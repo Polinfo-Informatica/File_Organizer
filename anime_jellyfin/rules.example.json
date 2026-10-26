@@ -1,0 +1,22 @@
+{
+  "folders": {
+    "Example Season 2": {
+      "series": "Example Series (2024)",
+      "season": 2,
+      "episode_offset": 0
+    },
+    "Unwanted Folder": {"skip": true}
+  },
+  "files": {
+    "Example/special.mkv": {
+      "series": "Example Series (2024)",
+      "season": 0,
+      "episode": 1
+    },
+    "Example/movie.mkv": {
+      "type": "movie",
+      "title": "Example Movie",
+      "year": 2024
+    }
+  }
+}

@@ -84,6 +84,17 @@ class OrganizerTests(unittest.TestCase):
   p=self.plan({'files':{'Test movie.mkv':{'type':'movie','title':'Test Movie','year':2024,'provider_id':'tmdbid-123'}}})
   d=Path(p['entries'][0]['destination'])
   self.assertEqual(d.parent.parent.name,'Movies'); self.assertEqual(d.stem,d.parent.name)
+ def test_inplace_move_and_undo_without_reading_contents(self):
+  from unittest.mock import patch
+  original=self.file('Test - 01.mkv')
+  p=o.make_plan(self.src,self.src); j=self.base/'inplace.jsonl'
+  with patch.object(o, 'exclusive_copy', side_effect=AssertionError('Move must not copy')):
+   self.run_quiet(o.apply,p,j,'move')
+   dest=Path(p['entries'][0]['destination'])
+   self.assertTrue(dest.exists()); self.assertFalse(original.exists())
+   self.assertEqual(o.make_plan(self.src,self.src)['entries'],[])
+   self.run_quiet(o.undo,j)
+  self.assertTrue(original.exists()); self.assertFalse(dest.exists())
  def test_non_nested_roots(self):
   with self.assertRaises(ValueError): o.make_plan(self.src,self.src/'output')
  def test_escape_plan(self):

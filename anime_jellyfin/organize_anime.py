@@ -110,13 +110,6 @@ def snapshot(path):
     stat = path.stat()
     return {'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}
 
-def digest(path):
-    h = hashlib.sha256()
-    with path.open('rb') as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
 def inventory(root):
     result = collections.Counter()
     existing_metadata = []
@@ -152,10 +145,10 @@ def make_plan(root, target, rules=None):
     root, target = Path(root).absolute(), Path(target).absolute()
     check_path(root); check_path(target)
     root, target = root.resolve(), target.resolve()
-    if not root.is_dir() or within(root, target) or within(target, root):
-        raise ValueError('Source must exist; use separate non-nested source and destination roots')
+    if not root.is_dir() or (root != target and (within(root, target) or within(target, root))):
+        raise ValueError('Source must exist; target must be the source itself or a separate non-nested directory')
     rules = rules or {}
-    files = list(walk(root))
+    files = [p for p in walk(root) if root != target or p.relative_to(root).parts[0] not in {'Shows', 'Movies'}]
     by_folder = collections.defaultdict(list)
     for p in files:
         by_folder[p.parent].append(p)
@@ -239,11 +232,11 @@ def exclusive_copy(source, destination):
         shutil.copyfileobj(src, dst, 8 * 1024 * 1024)
     shutil.copystat(source, destination)
 
-def validate_plan(plan):
+def validate_plan(plan, allow_existing=False):
     if plan.get('version') != 1 or plan.get('blocked'):
         raise ValueError('Unsupported or blocked plan')
     source_root, target_root = Path(plan['source_root']).resolve(), Path(plan['target_root']).resolve()
-    if within(source_root, target_root) or within(target_root, source_root):
+    if source_root != target_root and (within(source_root, target_root) or within(target_root, source_root)):
         raise ValueError('Overlapping roots')
     targets, sources = set(), set()
     for e in plan['entries']:
@@ -251,14 +244,18 @@ def validate_plan(plan):
         check_path(src); check_path(dst)
         if not src.is_absolute() or not dst.is_absolute() or not within(src.resolve(), source_root) or not within(dst.resolve(), target_root):
             raise ValueError('Path escapes plan roots')
+        if src.resolve() == dst.resolve():
+            raise ValueError('Source and destination paths must differ')
+        if source_root == target_root and dst.relative_to(target_root).parts[0] not in {'Shows', 'Movies'}:
+            raise ValueError('In-place destinations must be under Shows or Movies')
         sk, dk = str(src.resolve()).casefold(), str(dst.resolve()).casefold()
-        if sk in sources or dk in targets or dst.exists():
+        if sk in sources or dk in targets or (dst.exists() and not allow_existing):
             raise ValueError(f'Duplicate path or existing destination: {dst}')
         sources.add(sk); targets.add(dk)
         if not src.is_file() or snapshot(src) != {k: e[k] for k in ('size', 'mtime_ns')}:
             raise ValueError(f'Source changed; regenerate plan: {src}')
 
-def apply(plan, journal, mode='hardlink'):
+def apply_legacy(plan, journal, mode='hardlink'):
     validate_plan(plan)
     journal = Path(journal).absolute()
     journal.parent.mkdir(parents=True, exist_ok=True)
@@ -269,9 +266,9 @@ def apply(plan, journal, mode='hardlink'):
         check_path(src); check_path(dst)
         if snapshot(src) != {k: e[k] for k in ('size', 'mtime_ns')}:
             raise ValueError(f'Source changed during apply: {src}')
-        sha = digest(src)
+        source_info = identity(src)
         operation = 'copy' if e['kind'] != 'video' and mode == 'hardlink' else mode
-        row = {'id': uuid.uuid4().hex, 'state': 'prepared', 'operation': operation, 'source': str(src), 'destination': str(dst), 'sha256': sha}
+        row = {'id': uuid.uuid4().hex, 'state': 'prepared', 'operation': operation, 'source': str(src), 'destination': str(dst), 'source_identity': source_info}
         append_journal(journal, row)
         dst.parent.mkdir(parents=True, exist_ok=True)
         if operation == 'hardlink':
@@ -280,13 +277,84 @@ def apply(plan, journal, mode='hardlink'):
             exclusive_copy(src, dst)
         else:
             raise ValueError('Unknown operation')
-        if digest(dst) != sha or snapshot(src) != {k: e[k] for k in ('size', 'mtime_ns')}:
+        if snapshot(dst) != snapshot(src) or snapshot(src) != {k: e[k] for k in ('size', 'mtime_ns')}:
             raise ValueError(f'File changed or copy verification failed; inspect journal: {journal}')
         if operation == 'move':
             src.unlink()
+        row['identity'] = identity(dst)
         row['state'] = 'completed'
         append_journal(journal, row)
         print(f'{operation}: {dst}')
+    return journal
+
+def identity(path):
+    info = path.stat()
+    return {'size': info.st_size, 'mtime_ns': info.st_mtime_ns,
+            'device': info.st_dev, 'inode': info.st_ino}
+
+def nearest_existing_parent(path):
+    parent = path.parent
+    while not parent.exists():
+        parent = parent.parent
+    return parent
+
+def rename_exclusive(source, destination):
+    # Windows rename refuses existing destinations and never falls back to copying.
+    if os.name == 'nt':
+        os.rename(source, destination)
+    else:
+        # Atomic exclusive creation on the same filesystem, followed by unlink.
+        os.link(source, destination)
+        source.unlink()
+
+def apply(plan, journal, mode='move'):
+    if mode != 'move':
+        return apply_legacy(plan, journal, mode)
+    validate_plan(plan, allow_existing=True)
+    known_copies = set()
+    for previous in Path(journal).absolute().parent.glob('journal-*.jsonl'):
+        rows = [json.loads(line) for line in previous.read_text(encoding='utf-8').splitlines() if line.strip()]
+        reverted = {r['id'] for r in rows if r.get('state') == 'undone'}
+        known_copies.update((r['source'], r['destination']) for r in rows
+                           if r.get('state') == 'completed' and r.get('operation') == 'copy' and r['id'] not in reverted)
+    work = []
+    for entry in plan['entries']:
+        src, dst = Path(entry['source']), Path(entry['destination'])
+        if src.stat().st_dev != nearest_existing_parent(dst).stat().st_dev:
+            raise ValueError(f'Move requires the same filesystem; no copy fallback: {dst}')
+        existing = dst.exists()
+        if existing:
+            if not dst.is_file() or (not src.samefile(dst) and
+                (snapshot(src) != snapshot(dst) or (str(src), str(dst)) not in known_copies)):
+                raise ValueError(f'Existing destination differs; refusing move: {dst}')
+        work.append((entry, existing, identity(src), identity(dst) if existing else None))
+    journal = Path(journal).absolute()
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open('x', encoding='utf-8'):
+        pass
+    for index, (entry, existing, original_id, destination_id) in enumerate(work, 1):
+        src, dst = Path(entry['source']), Path(entry['destination'])
+        check_path(src); check_path(dst)
+        if identity(src) != original_id:
+            raise ValueError(f'Source changed during move: {src}')
+        if existing and (identity(dst) != destination_id):
+            raise ValueError(f'Existing destination changed during move: {dst}')
+        row = {'id': uuid.uuid4().hex, 'state': 'prepared',
+               'operation': 'move_existing' if existing else 'move_fast',
+               'source': str(src), 'destination': str(dst),
+               'identity': destination_id if existing else original_id}
+        append_journal(journal, row)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if existing:
+            # A verified prior hardlink/copy already provides the organized path.
+            src.unlink()
+        else:
+            rename_exclusive(src, dst)
+        if identity(dst) != row['identity']:
+            raise ValueError(f'Destination identity changed; inspect journal: {journal}')
+        row['state'] = 'completed'
+        append_journal(journal, row)
+        print(f'[{index}/{len(work)}] move: {dst}', flush=True)
     return journal
 
 def undo(journal):
@@ -302,18 +370,37 @@ def undo(journal):
             continue
         src, dst = Path(row['source']), Path(row['destination'])
         check_path(src); check_path(dst)
-        if not dst.is_file() or digest(dst) != row['sha256']:
-            raise ValueError(f'Destination missing or changed; refusing undo: {dst}')
+        if row['operation'] in ('move_fast', 'move_existing'):
+            if not dst.is_file() or identity(dst) != row['identity']:
+                raise ValueError(f'Destination changed; refusing undo: {dst}')
+            if src.exists():
+                raise ValueError(f'Original path occupied: {src}')
+            src.parent.mkdir(parents=True, exist_ok=True)
+            if row['operation'] == 'move_existing':
+                os.link(dst, src)
+            else:
+                rename_exclusive(dst, src)
+            row['state'] = 'undone'
+            append_journal(journal, row)
+            undone.add(row['id'])
+            print(f'undone: {dst}', flush=True)
+            continue
+        if not dst.is_file():
+            raise ValueError(f'Destination missing; refusing undo: {dst}')
+        if row.get('identity') and identity(dst) != row['identity']:
+            raise ValueError(f'Destination changed; refusing undo: {dst}')
+        if not row.get('identity') and (not src.is_file() or snapshot(src) != snapshot(dst)):
+            raise ValueError('Legacy journal has no file identity; matching originals are required for undo')
         if row['operation'] == 'move':
             if src.exists():
                 raise ValueError(f'Original path occupied: {src}')
             src.parent.mkdir(parents=True, exist_ok=True)
             exclusive_copy(dst, src)
-            if digest(src) != row['sha256']:
+            if snapshot(src) != snapshot(dst):
                 raise ValueError('Restore verification failed')
             dst.unlink()
         elif row['operation'] in ('copy', 'hardlink'):
-            if not src.is_file() or digest(src) != row['sha256']:
+            if not src.is_file() or snapshot(src) != snapshot(dst):
                 raise ValueError(f'Original missing or changed; refusing to delete destination: {src}')
             dst.unlink()
         else:
@@ -328,18 +415,18 @@ def main(argv=None):
     commands = parser.add_subparsers(dest='command', required=True)
     plan = commands.add_parser('plan', help='Read filenames and save a preview; do not change media')
     plan.add_argument('--source', required=True)
-    plan.add_argument('--target', required=True)
+    plan.add_argument('--target', help='Defaults to organizing inside the source directory')
     plan.add_argument('--rules')
     plan.add_argument('--output', default='logs/plan.json')
     execute = commands.add_parser('apply')
     execute.add_argument('--plan', required=True)
     execute.add_argument('--journal', default=None)
-    execute.add_argument('--mode', choices=['hardlink', 'copy', 'move'], default='hardlink')
+    execute.add_argument('--mode', choices=['hardlink', 'copy', 'move'], default='move')
     revert = commands.add_parser('undo')
     revert.add_argument('--journal', required=True)
     args = parser.parse_args(argv)
     if args.command == 'plan':
-        result = make_plan(args.source, args.target, load_json(args.rules) if args.rules else None)
+        result = make_plan(args.source, args.target or args.source, load_json(args.rules) if args.rules else None)
         output = Path(args.output).absolute()
         save_json(output, result)
         preview = output.with_suffix('.csv')

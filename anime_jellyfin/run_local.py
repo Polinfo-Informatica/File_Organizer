@@ -28,15 +28,17 @@ def menu():
     logs.mkdir(exist_ok=True)
     print('Anime Jellyfin Organizer - FAST MOVE (no content hashes)')
     print(f"Download root: {settings['source']}")
-    print(f"Output root: {settings['target']}")
+    print('Episodes stay directly in their existing anime folders.')
+    print(f"Movies folder: {settings.get('movies', str(Path(settings['source']).parent / 'Movies'))}")
     print('1 - Generate preview (no media changes)')
     print('2 - Apply the latest preview using fast same-drive moves')
     print('3 - Undo the latest journal')
     print('4 - Open the reports directory')
+    print('5 - Delete images and NFO in Anime and Movies')
     choice = '1' if '--preview' in sys.argv else (input('Option [1]: ').strip() or '1')
     if choice == '1':
         plan = logs / f'plan-{uuid.uuid4().hex}.json'
-        args = ['plan', '--source', settings['source'], '--target', settings['target'], '--output', str(plan)]
+        args = ['plan', '--source', settings['source'], '--target', settings['source'], '--movies', settings.get('movies', str(Path(settings['source']).parent / 'Movies')), '--output', str(plan)]
         rules = BASE / 'local_rules.json'
         if rules.exists():
             args.extend(['--rules', str(rules)])
@@ -62,6 +64,10 @@ def menu():
             organizer.main(['undo', '--journal', journal])
     elif choice == '4':
         os.startfile(logs)
+    elif choice == '5':
+        from clean_images_nfo import cleanup
+        cleanup([settings['source'], settings.get('movies', str(Path(settings['source']).parent / 'Movies'))], apply=True)
+        print('Generate a fresh preview after cleanup before applying moves.')
     else:
         raise ValueError('Unknown option')
 

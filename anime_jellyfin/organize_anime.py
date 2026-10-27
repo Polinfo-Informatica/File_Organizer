@@ -141,27 +141,65 @@ def inventory(root):
         result[kind] += 1
     return {'counts': dict(result), 'existing_series_metadata_for_review_only': existing_metadata}
 
-def make_plan(root, target, rules=None):
-    root, target = Path(root).absolute(), Path(target).absolute()
+def existing_anime_folder(video, root, title, folder_rule):
+    requested = folder_rule.get('folder')
+    reserved = {'shows', 'movies'}
+    if requested:
+        folder = root / requested
+        if folder.parent != root or not folder.is_dir() or folder.name.casefold() in reserved:
+            raise ValueError('Anime folder override must name an existing direct anime directory')
+        return folder
+    parts = video.relative_to(root).parts
+    if len(parts) > 1 and parts[0].casefold() not in reserved:
+        return root / parts[0]
+    candidate = parts[1] if len(parts) > 2 and parts[0].casefold() == 'shows' else title
+    key = lambda name: re.sub(r'[^\w]', '', name, flags=re.UNICODE).casefold()
+    matches = [d for d in root.iterdir() if d.is_dir() and not linked(d)
+               and d.name.casefold() not in reserved and not d.name.endswith('.trickplay')
+               and key(d.name) == key(candidate)]
+    if len(matches) != 1:
+        raise ValueError('No unique existing anime folder; add a folder mapping. No new folder will be created')
+    return matches[0]
+
+def movie_title(path):
+    clean = re.sub(r'\[[^\]]*\]', '', path.stem).strip()
+    match = re.fullmatch(r'(.+?)\s+-\s+Movie(?:\s+\d+)?(?:\s+-\s+(.+))?', clean, re.I)
+    if not match:
+        return None
+    return match[2] or match[1]
+
+def make_plan(root, target=None, rules=None, movies_root=None):
+    root = Path(root).absolute()
+    target = Path(target).absolute() if target else root
     check_path(root); check_path(target)
     root, target = root.resolve(), target.resolve()
-    if not root.is_dir() or (root != target and (within(root, target) or within(target, root))):
-        raise ValueError('Source must exist; target must be the source itself or a separate non-nested directory')
+    if not root.is_dir() or root != target:
+        raise ValueError('Anime output must remain inside the original anime root')
+    movies = Path(movies_root).absolute() if movies_root else root.parent / 'Movies'
+    check_path(movies)
+    movies = movies.resolve()
+    if not movies.is_dir() or within(movies, root) or within(root, movies):
+        raise ValueError('An existing separate movies directory is required')
     rules = rules or {}
-    files = [p for p in walk(root) if root != target or p.relative_to(root).parts[0] not in {'Shows', 'Movies'}]
+    files = list(walk(root))
     by_folder = collections.defaultdict(list)
     for p in files:
         by_folder[p.parent].append(p)
     entries, review = [], []
     def add(source, dest, kind, note):
+        if source == dest:
+            return
         entries.append({'source': str(source), 'destination': str(dest), 'kind': kind, 'note': note, **snapshot(source)})
     for video in (p for p in files if p.suffix.lower() in VIDEO):
         rel = video.relative_to(root).as_posix()
         rule = rules.get('files', {}).get(rel)
         try:
-            if rule and rule.get('skip'):
+            folder_rule = rules.get('folders', {}).get(video.relative_to(root).parts[0], {})
+            detected_movie = movie_title(video) if not rule else None
+            if folder_rule.get('skip') or (rule and rule.get('skip')):
                 raise ValueError('File skipped by rule')
-            if rule and rule.get('type') == 'movie':
+            if (rule and rule.get('type') == 'movie') or detected_movie:
+                rule = rule or {'type': 'movie', 'title': detected_movie}
                 title = safe_name(rule['title'])
                 if rule.get('year'):
                     title += f" ({int(rule['year'])})"
@@ -170,7 +208,7 @@ def make_plan(root, target, rules=None):
                     if not re.fullmatch(r'(?:tmdbid-\d+|imdbid-tt\d+)', provider):
                         raise ValueError('Invalid movie provider identifier')
                     title += f' [{provider}]'
-                folder = target / 'Movies' / title
+                folder = movies
                 stem = title
                 note = 'explicit movie rule'
             elif rule:
@@ -198,10 +236,11 @@ def make_plan(root, target, rules=None):
                 if not 0 <= season <= 999 or not 1 <= ep <= end <= 9999:
                     raise ValueError('Invalid season/episode mapping')
                 code = f'S{season:02d}E{ep:02d}' + (f'-E{end:02d}' if end > ep else '')
-                folder = target / 'Shows' / title / f'Season {season:02d}'
+                folder = existing_anime_folder(video, root, title, {**folder_rule, **(rule or {})})
                 quality_match = re.search(r'(?<!\d)(\d{3,4}[pi])(?!\w)', video.name, re.I)
                 quality = quality_match[1].lower() if quality_match else 'original'
-                release = hashlib.sha256(rel.encode('utf-8')).hexdigest()[:10]
+                existing_label = re.search(r'\[([a-f0-9]{10})\]$', video.stem)
+                release = existing_label[1] if existing_label else hashlib.sha256(rel.encode('utf-8')).hexdigest()[:10]
                 stem = f'{title} - {code} - {quality} [{release}]'
             add(video, folder / (stem + video.suffix.lower()), 'video', note)
             for companion in by_folder[video.parent]:
@@ -218,7 +257,7 @@ def make_plan(root, target, rules=None):
     if bad:
         # Keep collision handling fail-closed for the complete plan.
         review.extend({'source': s, 'reason': 'Destination/source collision: select one release or map explicitly'} for s in sorted(bad))
-    return {'version': 1, 'source_root': str(root), 'target_root': str(target), 'blocked': bool(bad), 'entries': entries, 'review': review,
+    return {'version': 2, 'layout': 'existing-anime-folders', 'movies_root': str(movies), 'source_root': str(root), 'target_root': str(target), 'blocked': bool(bad), 'entries': entries, 'review': review,
             'inventory': inventory(root), 'notice': 'Filename syntax is standardized. Verify series identity and episode order against the Jellyfin metadata provider. NFO, shared artwork and trickplay are left in the source.'}
 
 def append_journal(path, row):
@@ -233,21 +272,23 @@ def exclusive_copy(source, destination):
     shutil.copystat(source, destination)
 
 def validate_plan(plan, allow_existing=False):
-    if plan.get('version') != 1 or plan.get('blocked'):
-        raise ValueError('Unsupported or blocked plan')
+    if plan.get('version') != 2 or plan.get('layout') != 'existing-anime-folders' or plan.get('blocked'):
+        raise ValueError('Old layout or blocked plan; generate a fresh preview')
     source_root, target_root = Path(plan['source_root']).resolve(), Path(plan['target_root']).resolve()
-    if source_root != target_root and (within(source_root, target_root) or within(target_root, source_root)):
-        raise ValueError('Overlapping roots')
+    movies_root = Path(plan['movies_root']).resolve()
+    if source_root != target_root or not movies_root.is_dir() or within(movies_root, source_root) or within(source_root, movies_root):
+        raise ValueError('Invalid existing-folder roots')
     targets, sources = set(), set()
     for e in plan['entries']:
         src, dst = Path(e['source']), Path(e['destination'])
         check_path(src); check_path(dst)
-        if not src.is_absolute() or not dst.is_absolute() or not within(src.resolve(), source_root) or not within(dst.resolve(), target_root):
+        if not src.is_absolute() or not dst.is_absolute() or not within(src.resolve(), source_root) or not (within(dst.resolve(), target_root) or dst.resolve().parent == movies_root):
             raise ValueError('Path escapes plan roots')
         if src.resolve() == dst.resolve():
             raise ValueError('Source and destination paths must differ')
-        if source_root == target_root and dst.relative_to(target_root).parts[0] not in {'Shows', 'Movies'}:
-            raise ValueError('In-place destinations must be under Shows or Movies')
+        if dst.resolve().parent != movies_root:
+            if dst.parent.parent != source_root or not dst.parent.is_dir() or dst.parent.name.casefold() in {'shows', 'movies'}:
+                raise ValueError('Anime destinations must stay directly in an existing anime folder')
         sk, dk = str(src.resolve()).casefold(), str(dst.resolve()).casefold()
         if sk in sources or dk in targets or (dst.exists() and not allow_existing):
             raise ValueError(f'Duplicate path or existing destination: {dst}')
@@ -270,7 +311,8 @@ def apply_legacy(plan, journal, mode='hardlink'):
         operation = 'copy' if e['kind'] != 'video' and mode == 'hardlink' else mode
         row = {'id': uuid.uuid4().hex, 'state': 'prepared', 'operation': operation, 'source': str(src), 'destination': str(dst), 'source_identity': source_info}
         append_journal(journal, row)
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not dst.parent.is_dir():
+            raise ValueError(f'Destination directory disappeared; no directory will be created: {dst.parent}')
         if operation == 'hardlink':
             os.link(src, dst)
         elif operation in ('copy', 'move'):
@@ -344,7 +386,8 @@ def apply(plan, journal, mode='move'):
                'source': str(src), 'destination': str(dst),
                'identity': destination_id if existing else original_id}
         append_journal(journal, row)
-        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not dst.parent.is_dir():
+            raise ValueError(f'Destination directory disappeared; no directory will be created: {dst.parent}')
         if existing:
             # A verified prior hardlink/copy already provides the organized path.
             src.unlink()
@@ -415,7 +458,8 @@ def main(argv=None):
     commands = parser.add_subparsers(dest='command', required=True)
     plan = commands.add_parser('plan', help='Read filenames and save a preview; do not change media')
     plan.add_argument('--source', required=True)
-    plan.add_argument('--target', help='Defaults to organizing inside the source directory')
+    plan.add_argument('--target', help='Must be identical to source')
+    plan.add_argument('--movies', help='Existing movies folder; defaults to the sibling Movies directory')
     plan.add_argument('--rules')
     plan.add_argument('--output', default='logs/plan.json')
     execute = commands.add_parser('apply')
@@ -426,7 +470,7 @@ def main(argv=None):
     revert.add_argument('--journal', required=True)
     args = parser.parse_args(argv)
     if args.command == 'plan':
-        result = make_plan(args.source, args.target or args.source, load_json(args.rules) if args.rules else None)
+        result = make_plan(args.source, args.target or args.source, load_json(args.rules) if args.rules else None, movies_root=args.movies)
         output = Path(args.output).absolute()
         save_json(output, result)
         preview = output.with_suffix('.csv')

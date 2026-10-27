@@ -1,0 +1,6 @@
+{
+  "source": "D:\\Videos\\Anime",
+  "target": "D:\\Videos\\Anime",
+  "movies": "D:\\Videos\\Movies",
+  "jellyfin_server": "C:\\ProgramData\\Jellyfin\\Server"
+}

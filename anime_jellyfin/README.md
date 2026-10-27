@@ -14,32 +14,57 @@ Movies go directly into the separate EXISTING movies directory, normally the sib
 
 Old previews using the previous layout are rejected. Generate a fresh preview.
 
-## Windows menu
+## Central Windows control
 
-Open Run.cmd, or INICIAR.cmd in the customized local package.
+Open INICIAR.cmd (Run.cmd is an alias). The complete package uses Python 3.10+ and only the standard library. No pip installation is needed.
 
-1. Generate a preview without changing media.
-2. Apply fast moves after typing APPLY.
-3. Undo the latest move journal after typing UNDO.
+1. Preview organization.
+2. Apply the latest preview with same-drive moves.
+3. Undo the latest move journal.
 4. Open reports.
-5. Delete images and NFO recursively in the configured Anime and Movies roots.
+5. Delete images and NFO in both configured media roots.
+6. Remove empty directories without removing the media roots.
+7. Preview/delete duplicate episode releases.
+8. Audit media folders, Jellyfin library settings and the latest server log (read-only; default).
+9. Edit local settings.
+10. Edit local naming rules.
 
-Local settings contain source, target (identical to source), and movies paths. Local rules and reports stay out of Git. The customized local package also has LIMPAR_IMAGENS_NFO.cmd for one-click cleanup.
+The one-off Tensei correction is intentionally not part of this tool.
 
-CLI:
+On first interactive launch, enter existing Anime and Movies paths. For unattended use, copy local_settings.example.json to local_settings.json and edit the paths. The customized package already has the user's paths, rules and fansub provenance. These private files are excluded from Git. Source and target are the same directory; movies must use a separate existing directory.
 
-    python organize_anime.py plan --source "D:\Videos\Anime" --movies "D:\Videos\Movies" --output "logs\plan.json"
-    python organize_anime.py apply --plan "logs\plan.json"
-    python organize_anime.py undo --journal "logs\journal-ID.jsonl"
-    python clean_images_nfo.py --apply
+CLI examples:
 
-Use a fresh output filename for each preview. Generate a NEW preview after deleting companions, before applying moves.
+    python run_local.py --check
+    python run_local.py --action audit
+    python run_local.py --action plan
+    python run_local.py --action move --apply
+    python run_local.py --action duplicates
+    python run_local.py --action duplicates --apply
+    python run_local.py --action images --apply
+    python run_local.py --action empty --apply
+
+Without --apply, modifying CLI actions do not execute. The interactive menu requests APPLY, DELETE or UNDO for modifying actions. Legacy cleanup launchers explicitly pass --apply, retaining their one-click behavior. ANALISAR_JELLYFIN.cmd runs only the audit.
+
+All logs are metadata-only reports, never video backups. Cleanup deletions are permanent; move undo does not restore deleted files. No video copying or content hashes are used by the controller. Generate a fresh move preview after cleanup.
+
+## Duplicate releases
+
+Groups require matching normalized title, season and episode/range. Higher resolution wins; at equal resolution a known Erai-raws release wins over known other fansubs. Unknown/same-fansub ties remain in the review report. Local fansub_provenance.json can recover fansub labels from previous naming plans. Hardlink duplicates are detected by filesystem identity. Identical independent copies cannot be proven without reading their contents and are not automatically deleted solely for matching size. Movies are not deduplicated by guessed titles.
+
+## Read-only audit
+
+Lists image/NFO leftovers, empty folders, nested videos, nonstandard episode names, matching episode groups, zero-byte videos and companion files. Reads library paths and selected flags from Jellyfin options.xml plus error counts from the newest log. Server path defaults to C:\ProgramData\Jellyfin\Server and can be overridden using jellyfin_server in local settings. No database, media contents or secrets are read. Names needing review are not proof of broken media. The report is a snapshot; concurrent downloads or reorganization can change it.
+
+For lighter scans, review chapter/trickplay extraction during library scanning. Disable local NFO saving if the media directories should stay free of NFO files. Embedded titles/episode information can override the intended file naming; review those options if release titles appear in the UI. Do not delete Jellyfin databases or its metadata directory as routine cleanup. Rescan after moving files. Pause torrents and Jellyfin scanning/image generation before organizing or deleting images to avoid concurrent file changes. MKA audio and subtitles are companions, not junk.
+
+References: https://jellyfin.org/docs/general/server/media/shows/ and https://jellyfin.org/docs/general/server/media/movies/
 
 ## Image/NFO cleanup
 
 Deletes only .nfo and image extensions, including JPG/JPEG/PNG/WebP/GIF/BMP/TIFF/AVIF/HEIC/ICO/SVG. Image files inside trickplay are included. Videos, subtitles, other file types and directories are excluded. Symlinks/junctions are skipped and each path is checked against the explicit roots. A report lists selected/deleted paths and failures.
 
-Deletion is permanent and has no app undo. The cleanup report is a log, not a content backup. Restore deleted assets from a separate backup or let Jellyfin regenerate metadata and artwork. Pause metadata/image generation if you need the folders to remain free of regenerated assets. No empty-directory cleanup is performed.
+Deletion is permanent and has no app undo. The cleanup report is a log, not a content backup. Let Jellyfin regenerate metadata and artwork if needed. Pause metadata/image generation if you need the folders to remain free of regenerated assets. No empty-directory cleanup is performed.
 
 ## Naming and catalog rules
 
@@ -55,7 +80,7 @@ Moves use file identity, size and modification time, not content hashes. Metadat
 
 Destinations are never overwritten. Journals record prepared/completed moves. Undo renames completed moves back and refuses changed identities or occupied source paths. Old copy/hardlink journals require matching originals for safe automated undo. Interrupted prepared records require manual inspection.
 
-Manual reversal: use each completed journal entry to return the destination to its original path only if that path is free. Preserve originals before removing old linked/copied output. Keep logs and app backups. Empty folders may remain. Cleanup deletions are separate from move journals and cannot be undone by option 3.
+Manual reversal: use each completed journal entry to return the destination to its original path only if that path is free. Preserve originals before removing old linked/copied output. Keep move journals if you want to undo moves. Empty folders may remain. Cleanup deletions are separate from move journals and cannot be undone by option 3.
 
 ## Tests
 

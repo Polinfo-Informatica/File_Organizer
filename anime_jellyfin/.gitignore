@@ -1,5 +1,7 @@
 logs/
 local_settings.json
 local_rules.json
+fansub_provenance.json
+START_HERE.txt
 __pycache__/
 *.pyc

@@ -1,5 +1,2 @@
 @echo off
-setlocal
-cd /d "%~dp0"
-python run_local.py
-pause
+call "%~dp0INICIAR.cmd" %*

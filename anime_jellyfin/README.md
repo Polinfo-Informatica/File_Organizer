@@ -1,30 +1,64 @@
 # Anime Jellyfin Organizer
 
-Python 3.10+, standard library only. Open Run.cmd, or INICIAR.cmd in the customized package.
+Python 3.10+, standard library only. Default mode: direct same-filesystem MOVE. No video copies, transcoding or file-content hashes.
 
-The default is now FAST MOVE: direct same-filesystem rename. It does not copy videos or read their contents to calculate hashes. Cross-filesystem moves are refused. Copy and hardlink modes require explicit CLI selection.
+## Required layout
 
-Without --target, the source root is also the destination root. Organized files go under Shows/Series/Season 01 and Movies/Title (Year). In-place scanning excludes these generated subtrees. Torrent paths change after moves.
+Episodes stay directly in their EXISTING top-level anime folders:
 
-Menu: 1 preview, 2 apply moves, 3 undo, 4 reports. Local settings and rules remain in local_settings.json and local_rules.json. Plans, journals and backups stay local.
+    Anime/Existing Anime Name/Series - S02E03 - 1080p [release-id].mkv
 
-CLI examples:
+The app never creates Shows, Movies, Season folders, or new anime folders inside Anime. The existing parent folder is preserved even if its name differs from the release title. Loose episodes require a unique matching existing anime folder or a rule with folder set to an existing folder name; otherwise they remain for review.
 
-    python organize_anime.py plan --source "D:\Downloads\Anime" --output "logs\plan.json"
+Movies go directly into the separate EXISTING movies directory, normally the sibling Movies directory. It must exist and may not be inside Anime. Explicit movie rules and clear '- Movie' release markers are supported. Uncertain movies/specials remain for review rather than receiving arbitrary episode numbers.
+
+Old previews using the previous layout are rejected. Generate a fresh preview.
+
+## Windows menu
+
+Open Run.cmd, or INICIAR.cmd in the customized local package.
+
+1. Generate a preview without changing media.
+2. Apply fast moves after typing APPLY.
+3. Undo the latest move journal after typing UNDO.
+4. Open reports.
+5. Delete images and NFO recursively in the configured Anime and Movies roots.
+
+Local settings contain source, target (identical to source), and movies paths. Local rules and reports stay out of Git. The customized local package also has LIMPAR_IMAGENS_NFO.cmd for one-click cleanup.
+
+CLI:
+
+    python organize_anime.py plan --source "D:\Videos\Anime" --movies "D:\Videos\Movies" --output "logs\plan.json"
     python organize_anime.py apply --plan "logs\plan.json"
     python organize_anime.py undo --journal "logs\journal-ID.jsonl"
+    python clean_images_nfo.py --apply
 
-Naming supports S01E02, dash numbers, ranges, v2 revisions, season markers, roman suffixes, bracketed releases and Unicode. Filename-path identifiers preserve multiple versions; calculating them does not read video data. Exact matching subtitles, external audio and episode thumbnails follow the video. Original NFO, shared artwork and trickplay are left for Jellyfin to regenerate in the new library.
+Use a fresh output filename for each preview. Generate a NEW preview after deleting companions, before applying moves.
 
-The review report lists special cases requiring explicit catalog mappings. Season assumptions also appear in preview notes. Correct filename syntax does not prove correct catalog order. Check the configured Jellyfin provider. Rules examples show folder-level season/offset mappings, per-file specials and movie mappings. Files and folders can be skipped explicitly. Provider IDs accept TMDB/TVDB/IMDb identifiers appropriate to the media.
+## Image/NFO cleanup
 
-Moves use quick file-identity, size and modification-time checks. These checks cannot detect content changes that preserve those attributes. Use stable completed downloads. Conflicting destinations stop apply; files are never overwritten. Existing hardlinks can be adopted. Existing independent copies require matching size/time and an earlier completed copy journal with the exact paths.
+Deletes only .nfo and image extensions, including JPG/JPEG/PNG/WebP/GIF/BMP/TIFF/AVIF/HEIC/ICO/SVG. Image files inside trickplay are included. Videos, subtitles, other file types and directories are excluded. Symlinks/junctions are skipped and each path is checked against the explicit roots. A report lists selected/deleted paths and failures.
 
-Journals record prepared and completed operations. Undo renames completed moves back, checks identity and refuses occupied original paths. Adopted existing destinations are preserved during undo. Old journals without identity information require matching originals for automated reversal; inspect uncertain legacy moves manually. Interrupted prepared entries are deliberately left for inspection.
+Deletion is permanent and has no app undo. The cleanup report is a log, not a content backup. Restore deleted assets from a separate backup or let Jellyfin regenerate metadata and artwork. Pause metadata/image generation if you need the folders to remain free of regenerated assets. No empty-directory cleanup is performed.
 
-Manual recovery: use the journal to return each completed destination to its original source path only when that path is free. Preserve originals before removing old copied/linked output. Keep journals. Empty folders may remain. Restore scripts from backups to revert the app version; media changes require journal undo or manual path restoration.
+## Naming and catalog rules
 
-Tests: python -m unittest discover -s . -v
-Tests cover parsing, mapping, conflicts, Unicode, copy/move/undo and in-place moving without invoking the copy routine. Optional hardlink integration is skipped when the host denies link creation.
+Supports S01E02, dash episode numbers, ranges, v2, season suffixes, roman numerals II through VI, bracketed releases and Unicode. A deterministic filename-path label preserves multiple releases; it does not read video contents. Only exact-basename companions follow a video. NFO and shared artwork are left unchanged by organization itself; use cleanup to remove them.
 
-Jellyfin libraries: add Shows as Shows and Movies as Movies. Do not also scan the original messy parent as the same library.
+Names cannot prove catalog episode ordering. Inferred seasons are marked in preview notes. Absolute numbering, named arcs, specials and ambiguous patterns can require explicit mappings. TMDB and TVDB may use different season orders.
+
+Copy rules.example.json to local_rules.json. Folder rules support series, season, episode_offset, provider_id and folder (an existing direct anime folder). File rules take precedence and support series/season/episode/end_episode/provider_id/folder, or type=movie with title/year/provider_id. skip=true excludes an item. Use verified identifiers and special episode numbers.
+
+## Checks and undo
+
+Moves use file identity, size and modification time, not content hashes. Metadata checks cannot detect changes that preserve those attributes. Cross-filesystem moves are refused; there is no automatic copy fallback. Torrent paths change after moving.
+
+Destinations are never overwritten. Journals record prepared/completed moves. Undo renames completed moves back and refuses changed identities or occupied source paths. Old copy/hardlink journals require matching originals for safe automated undo. Interrupted prepared records require manual inspection.
+
+Manual reversal: use each completed journal entry to return the destination to its original path only if that path is free. Preserve originals before removing old linked/copied output. Keep logs and app backups. Empty folders may remain. Cleanup deletions are separate from move journals and cannot be undone by option 3.
+
+## Tests
+
+    python -m unittest discover -s . -v
+
+Tests cover existing-folder layout, rejection of nested/old destinations, movies routing, no-copy moves and undo, re-running previews, naming, conflicts, Unicode, metadata association, and cleanup preserving videos/subtitles. Hardlink integration may be skipped when host permissions deny it.

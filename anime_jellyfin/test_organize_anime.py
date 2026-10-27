@@ -8,10 +8,11 @@ import organize_anime as o
 class OrganizerTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory(dir=Path(__file__).parent); self.addCleanup(self.tmp.cleanup)
-  self.base=Path(self.tmp.name); self.src=self.base/'source'; self.src.mkdir(); self.dst=self.base/'target'
+  self.base=Path(self.tmp.name); self.src=self.base/'source'; self.src.mkdir(); self.dst=self.src; self.movies=self.base/'Movies'; self.movies.mkdir(); (self.src/'Test').mkdir()
  def file(self,name,data=b'video'):
+  if '/' not in name: name='Test/'+name
   p=self.src/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); return p
- def plan(self,rules=None): return o.make_plan(self.src,self.dst,rules)
+ def plan(self,rules=None): return o.make_plan(self.src,self.dst,rules,movies_root=self.movies)
  def run_quiet(self,fn,*args):
   with contextlib.redirect_stdout(io.StringIO()): return fn(*args)
  def test_release_patterns(self):
@@ -32,7 +33,7 @@ class OrganizerTests(unittest.TestCase):
   p=self.plan(); self.assertEqual(len(p['entries']),3)
   self.assertEqual(p['inventory']['counts']['jellyfin_nfo'],1)
   self.assertEqual(p['inventory']['counts']['jellyfin_trickplay'],1)
-  self.assertFalse(self.dst.exists())
+  self.assertFalse((self.src/'Shows').exists()); self.assertFalse((self.src/'Movies').exists()); self.assertFalse((self.src/'Test'/'Season 01').exists())
  def test_collision(self):
   self.file('[A] Test - 01.mkv'); self.file('[B] Test - 01.mkv')
   p=self.plan(); self.assertFalse(p['blocked']); self.assertNotEqual(p['entries'][0]['destination'],p['entries'][1]['destination'])
@@ -61,7 +62,7 @@ class OrganizerTests(unittest.TestCase):
    self.file(f'Test - {ep:02}.mkv'); self.file(f'Test - {ep:02}-thumb.jpg')
   p=self.plan(); self.assertEqual(len(p['entries']),4); self.assertFalse(p['blocked'])
  def test_existing_destination(self):
-  self.file('Test - 01.mkv'); p=self.plan(); d=Path(p['entries'][0]['destination']); d.parent.mkdir(parents=True); d.write_bytes(b'keep')
+  self.file('Test - 01.mkv'); p=self.plan(); d=Path(p['entries'][0]['destination']); d.parent.mkdir(parents=True,exist_ok=True); d.write_bytes(b'keep')
   with self.assertRaises(ValueError): o.apply(p,self.base/'j.jsonl')
   self.assertEqual(d.read_bytes(),b'keep')
  def test_source_changed(self):
@@ -73,28 +74,57 @@ class OrganizerTests(unittest.TestCase):
   with self.assertRaises(ValueError): o.undo(j)
  def test_file_rule_special(self):
   self.file('Test OVA.mkv')
-  p=self.plan({'files':{'Test OVA.mkv':{'series':'Test','season':0,'episode':3,'provider_id':'tmdbid-123'}}})
-  self.assertIn('Test [tmdbid-123]',p['entries'][0]['destination']); self.assertIn('S00E03',p['entries'][0]['destination'])
+  p=self.plan({'files':{'Test/Test OVA.mkv':{'series':'Test','season':0,'episode':3,'provider_id':'tmdbid-123'}}})
+  self.assertIn('Test [tmdbid-123]',Path(p['entries'][0]['destination']).name); self.assertIn('S00E03',p['entries'][0]['destination'])
  def test_folder_rule_absolute(self):
   self.file('Re Zero/[G] Re Zero - 51.mkv')
   p=self.plan({'folders':{'Re Zero':{'series':'Re Zero','season':3,'episode_offset':-50}}})
   self.assertIn('S03E01',p['entries'][0]['destination'])
  def test_movie_rule(self):
   self.file('Test movie.mkv')
-  p=self.plan({'files':{'Test movie.mkv':{'type':'movie','title':'Test Movie','year':2024,'provider_id':'tmdbid-123'}}})
+  p=self.plan({'files':{'Test/Test movie.mkv':{'type':'movie','title':'Test Movie','year':2024,'provider_id':'tmdbid-123'}}})
   d=Path(p['entries'][0]['destination'])
-  self.assertEqual(d.parent.parent.name,'Movies'); self.assertEqual(d.stem,d.parent.name)
+  self.assertEqual(d.parent,self.movies); self.assertIn('Test Movie (2024)',d.stem)
  def test_inplace_move_and_undo_without_reading_contents(self):
   from unittest.mock import patch
   original=self.file('Test - 01.mkv')
-  p=o.make_plan(self.src,self.src); j=self.base/'inplace.jsonl'
+  p=o.make_plan(self.src,self.src,movies_root=self.movies); j=self.base/'inplace.jsonl'
   with patch.object(o, 'exclusive_copy', side_effect=AssertionError('Move must not copy')):
    self.run_quiet(o.apply,p,j,'move')
    dest=Path(p['entries'][0]['destination'])
    self.assertTrue(dest.exists()); self.assertFalse(original.exists())
-   self.assertEqual(o.make_plan(self.src,self.src)['entries'],[])
+   self.assertEqual(o.make_plan(self.src,self.src,movies_root=self.movies)['entries'],[])
    self.run_quiet(o.undo,j)
   self.assertTrue(original.exists()); self.assertFalse(dest.exists())
+ def test_no_new_anime_directories(self):
+  self.file('Different Folder/[G] Different Title S2 - 01.mkv')
+  before={p for p in self.src.rglob('*') if p.is_dir()}
+  plan=self.plan(); self.run_quiet(o.apply,plan,self.base/'flat.jsonl','move')
+  after={p for p in self.src.rglob('*') if p.is_dir()}
+  self.assertEqual(before,after)
+  for e in plan['entries']: self.assertEqual(Path(e['destination']).parent,Path(e['source']).parent)
+ def test_loose_episode_needs_existing_folder(self):
+  p=self.src/'[G] Unknown Series - 01.mkv'; p.write_bytes(b'video')
+  result=self.plan(); self.assertEqual(result['entries'],[]); self.assertEqual(len(result['review']),1)
+ def test_detected_movie_goes_to_existing_movies(self):
+  self.file('[G] Overlord - Sei Oukoku-hen - Movie [1080p].mkv')
+  plan=self.plan(); self.assertEqual(len(plan['entries']),1)
+  self.assertEqual(Path(plan['entries'][0]['destination']).parent,self.movies)
+ def test_nested_anime_directory_rejected(self):
+  self.file('Test - 01.mkv'); plan=self.plan()
+  plan['entries'][0]['destination']=str(self.src/'Test'/'Season 01'/'Test S01E01.mkv')
+  with self.assertRaises(ValueError): o.validate_plan(plan)
+ def test_old_layout_rejected(self):
+  with self.assertRaises(ValueError): o.validate_plan({'version':1,'blocked':False})
+ def test_cleanup_preserves_video_and_subtitles(self):
+  import clean_images_nfo as c
+  from unittest.mock import patch
+  video=self.file('Test - 01.mkv'); subtitle=self.file('Test - 01.srt')
+  image=self.file('poster.JPG'); nfo=self.file('tvshow.nfo')
+  with patch.object(c,'BASE',self.base):
+   self.run_quiet(c.cleanup,[self.src,self.movies],True)
+  self.assertTrue(video.exists()); self.assertTrue(subtitle.exists())
+  self.assertFalse(image.exists()); self.assertFalse(nfo.exists())
  def test_non_nested_roots(self):
   with self.assertRaises(ValueError): o.make_plan(self.src,self.src/'output')
  def test_escape_plan(self):
